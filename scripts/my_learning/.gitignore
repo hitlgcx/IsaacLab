@@ -1,0 +1,11 @@
+# 训练日志和模型权重（体积大，不提交）
+logs/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE 配置
+.vscode/
+.idea/
