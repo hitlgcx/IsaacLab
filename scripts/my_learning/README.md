@@ -1,7 +1,7 @@
 # Isaac Lab 剥洋葱学习系列
 
 一套以"最小可运行代码"为原则的 Isaac Lab 渐进式学习教程。
-每个文件只新增**一个**知识点，在上一文件的基础上增量构建，最终完成 Go2 机器狗平地行走的完整训练。
+每个文件只新增**一个**知识点，在上一文件的基础上增量构建，最终完成 Go2 机器狗平地行走的完整训练，并延伸至 RGB 图像端到端 RL。
 
 ---
 
@@ -13,7 +13,8 @@ scripts/my_learning/
 ├── 02_manager_mdp/        # Manager-Based MDP 五大管理器
 ├── 03_skrl_training/      # skrl 训练框架（包装、算法、训练、推理、规模化）
 ├── 04_go2_locomotion/     # Go2 四足步态全流程（共 16 个步骤）
-└── 05_advanced/           # 高级专题（DirectRL、相机、操作臂）[占位待实现]
+├── 05_advanced/           # 高级专题（DirectRL、相机、操作臂）[占位待实现]
+└── 06_vision_rl/          # RGB 图像端到端 RL（TiledCamera → CNN → 训练推理）
 ```
 
 ---
@@ -98,6 +99,95 @@ step_1_0 ~ step_19_0 均在此环境下直接用 `python` 运行。
 | `step_23_0_diff_ik.py` | 05_controllers/ | 微分逆运动学（Franka 操作臂）|
 | `step_24_0_osc.py` | 05_controllers/ | 操作空间力/位混合控制 |
 
+### 06_vision_rl — RGB 图像端到端 RL
+
+| 文件 | 状态 | 核心知识点 |
+|------|------|-----------|
+| `step_25_0_tiled_camera.py` | 完成 | TiledCamera 并行渲染 / data.output["rgb"] / NHWC 格式 |
+| `step_26_0_image_obs.py` | 完成 | mdp.image ObsTerm / normalize=True / 图像不能与状态 cat |
+| `step_27_0_cnn_policy.py` | 完成 | permute NHWC→NCHW / 卷积层维度计算 / CNN 配置语法 |
+| `step_28_0_train_cartpole_rgb.py` | 完成 | ★ CartPole RGB 完整训练 / 对比状态 RL 收敛速度 |
+| `step_29_0_play_cartpole_rgb.py` | 完成 | CNN 策略推理 / mean_actions / enable_training_mode |
+| `step_30_0_pretrained_encoder.py` | 完成 | mdp.image_features / ResNet18 冻结特征 / 迁移学习对比 |
+
+---
+
+## RL 闭环——控制系统视角
+
+> 读懂这张图，后续每个 step 的配置就有了"为什么"的答案。
+
+```
+控制系统三要素：控制器 / 被控对象 / 传感器反馈
+```
+
+### CartPole RGB（step_28_0）
+
+```
+  参考输入              控制器（Actor）                被控对象
+  （隐含于奖励）
+                   ┌─────────────────────┐      ┌──────────────────────┐
+  "杆保持直立" ──→ │  CNN Policy π(a|o)  │─aₜ─→│   CartPole 物理系统  │
+                   │  permute NHWC→NCHW  │推力  │  滑块位置/速度        │
+                   │  Conv2d × 3         │      │  杆角度/角速度        │
+                   │  flatten → MLP(512) │      └──────────┬───────────┘
+                   └─────────────────────┘                 │
+                            ▲                    ┌─────────┘
+                            │             ┌──────▼──────┐
+                            │             │ TiledCamera │  ← 唯一传感器
+                            │             │ RGB 图像     │
+                            │             └──────┬──────┘
+                            │    mdp.image()     │
+                            └────────────────────┘
+                              反馈：完整图像帧 (N,100,100,3)
+```
+
+### Go2 行走（step_18_0 / step_18_1）
+
+```
+  参考输入              控制器（Actor）                被控对象
+  CommandManager
+                   ┌──────────────────┐      ┌──────────────────────────┐
+  速度指令(vx,vy,ωz)│  MLP Policy      │─aₜ─→│   Go2 机器人物理系统     │
+  generated_cmds──→│  π(a|o)          │关节  │  12 个关节               │
+                   │  MLP(256,128)    │位置  │  躯干姿态/速度            │
+                   └──────────────────┘目标  └──────────┬───────────────┘
+                            ▲                           │
+                            │              ┌────────────┘
+                            │    ┌─────────▼────────────────────────────┐
+                            │    │         传感器反馈                    │
+                            │    │                                      │
+                            │    │  ① IMU      projected_gravity  (3)  │
+                            │    │  ② 关节编码  joint_pos_rel     (12)  │
+                            │    │             joint_vel_rel     (12)  │
+                            │    │  ③ 指令透传  generated_commands (3)  │
+                            │    │                          合计 30 维  │
+                            │    │  ── step_18_1 额外新增 ──────────    │
+                            │    │  ④ 速度估计  base_lin/ang_vel  (6)  │
+                            │    │  ⑤ 动作历史  last_action       (12)  │
+                            │    │                          合计 48 维  │
+                            │    └──────────────────────────────────────┘
+                            └──────────────────────────────────────────────┘
+```
+
+### 三种配置对比
+
+```
+┌─────────────┬──────────────┬────────────────────┬──────────────────────┐
+│             │  控制器       │  传感器              │  反馈给控制器         │
+├─────────────┼──────────────┼────────────────────┼──────────────────────┤
+│ CartPole    │ CNN + MLP    │ 外部相机（唯一）     │ RGB图像(100×100×3)   │
+│ step_28_0   │ (像素→动作)  │                    │ 全部反馈              │
+├─────────────┼──────────────┼────────────────────┼──────────────────────┤
+│ Go2 最简    │ MLP          │ IMU / 关节编码器    │ 30 维向量             │
+│ step_18_0   │ (30维→动作)  │                    │ 无速度/无动作历史     │
+├─────────────┼──────────────┼────────────────────┼──────────────────────┤
+│ Go2 完整    │ MLP          │ IMU / 关节编码器    │ 48 维向量             │
+│ step_18_1   │ (48维→动作)  │ 速度估计 / 动作历史 │ 含速度+动作历史       │
+└─────────────┴──────────────┴────────────────────┴──────────────────────┘
+
+规律：传感器越丰富 → 反馈越完整 → 控制器决策越准确 → 但实物部署越难对齐
+```
+
 ---
 
 ## 学习路径
@@ -123,9 +213,18 @@ step_1_0 ~ step_19_0 均在此环境下直接用 `python` 运行。
   step_18_0                        # ★ 最简 Go2 RL 训练（2 条奖励，约 25 分钟验证）
   step_18_1                        # ★ 完整 Go2 RL 训练（9 条奖励，约 12 小时）
   step_19_0                        # Go2 推理展示
+       ↓
+06_vision_rl/
+  step_25_0                        # TiledCamera 传感器
+  step_26_0                        # 图像进入 ObservationManager
+  step_27_0                        # CNN 策略配置与维度验证
+  step_28_0                        # ★ CartPole RGB 训练（约 10-30 分钟）
+  step_29_0                        # CartPole RGB 推理
+  step_30_0                        # 预训练 ResNet18 编码器对比
 ```
 
 > **建议**：先跑 step_18_0 验证训练能收敛，再跑 step_18_1 体会每个优化点的收益。
+> 视觉 RL 建议先跑 step_28_0（CNN from scratch），再跑 step_30_0（ResNet18）对比收敛速度。
 
 ---
 
@@ -155,14 +254,36 @@ python scripts/my_learning/04_go2_locomotion/step_19_0_play_go2.py
 
 ---
 
-## 训练时长参考（RTX 5070 12GB，4096 envs）
+## 快速开始（06_vision_rl）
 
-| 任务 | 步数 | 预计时长 |
-|------|------|---------|
-| CartPole（step_9_0） | 2,400 | ~30 秒 |
-| Go2 最简（step_18_0，2048 envs） | 1,000,000 | ~25 分钟 |
-| Go2 完整快速验证（step_18_1） | 2,500,000 | ~12 小时 |
-| Go2 完整高质量 | 50,000,000 | ~10 天 |
+```bash
+conda activate env_isaaclab
+
+# 验证 TiledCamera 传感器（5 秒出现窗口，打印图像 shape）
+python scripts/my_learning/06_vision_rl/step_25_0_tiled_camera.py
+
+# CartPole RGB 完整训练（约 10-30 分钟，512 envs）
+python scripts/my_learning/06_vision_rl/step_28_0_train_cartpole_rgb.py
+
+# CartPole RGB 推理（需先完成 step_28_0）
+python scripts/my_learning/06_vision_rl/step_29_0_play_cartpole_rgb.py
+
+# ResNet18 预训练编码器对比（约 10-30 分钟）
+python scripts/my_learning/06_vision_rl/step_30_0_pretrained_encoder.py
+```
+
+---
+
+## 训练时长参考（RTX 5070 12GB）
+
+| 任务 | envs | 步数 | 预计时长 |
+|------|------|------|---------|
+| CartPole 状态 RL（step_9_0） | 4096 | 2,400 | ~30 秒 |
+| CartPole RGB CNN（step_28_0） | 512 | 100,000 | ~10-30 分钟 |
+| CartPole ResNet18（step_30_0） | 512 | 100,000 | ~10-30 分钟 |
+| Go2 最简（step_18_0） | 2048 | 1,000,000 | ~25 分钟 |
+| Go2 完整快速验证（step_18_1） | 4096 | 2,500,000 | ~12 小时 |
+| Go2 完整高质量 | 4096 | 50,000,000 | ~10 天 |
 
 ---
 
